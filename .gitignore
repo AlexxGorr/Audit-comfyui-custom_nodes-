@@ -1,0 +1,33 @@
+# === Секреты и окружение ===
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials*
+
+# === Артефакты и тяжёлые файлы ===
+*.tar
+*.tar.gz
+*.zip
+*.log
+!ss_v1/scan_toolkit.tar.gz
+
+# === Временное ===
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+*.code-workspace
+
+# === Python/Node (на будущее) ===
+__pycache__/
+*.pyc
+node_modules/
+venv/
+.venv/
