@@ -59,6 +59,13 @@ for f in scan.sh scan_inner.sh; do
     log "  OK $f найден"
 done
 
+# CRITICAL_CHECKLIST.md — опционально
+if [ -f "CRITICAL_CHECKLIST.md" ]; then
+    log "  OK CRITICAL_CHECKLIST.md найден"
+else
+    warn "  CRITICAL_CHECKLIST.md отсутствует — рекомендую добавить"
+fi
+
 # --- 3. Права на исполнение ---
 log ""
 log "[3/8] Установка прав на исполнение..."
@@ -173,6 +180,9 @@ log "     bash scan.sh --report"
 log ""
 log "  6. Справка:"
 log "     bash scan.sh --help"
+log ""
+log "  7. Чек-лист при CRITICAL:"
+log "     cat CRITICAL_CHECKLIST.md"
 log ""
 log "Документация: README.md"
 log ""

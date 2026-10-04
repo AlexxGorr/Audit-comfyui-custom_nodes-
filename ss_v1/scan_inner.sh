@@ -237,8 +237,8 @@ for node_dir in "${node_dirs[@]}"; do
 
     while IFS= read -r -d "" f; do
         file_count=$((file_count + 1))
-        rel="${f#$ROOT/}"
-        [ "$rel" = "$f" ] && rel="${f#$NODE_ROOT/}"
+        # Всегда относительно NODE_ROOT — путь с именем ноды
+        rel="${f#$NODE_ROOT/}"
         echo "FILE_START|$rel"
 
         if ! grep -Iq . "$f" 2>/dev/null; then

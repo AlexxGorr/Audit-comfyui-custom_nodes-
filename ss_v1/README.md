@@ -1,14 +1,4 @@
 # ComfyUI Custom Nodes Security Scanner
-Ниже — **актуальный README.md** под финальную версию (`v2.4+`, с `--list`, `--clean-old`, `f-hits`/`hit-files`, `install_scan_toolkit.sh`).
-
-И **команда PowerShell** для создания файла — если хочешь записать его **из Windows** (а не из WSL). Но с оговоркой: `README.md` — это **markdown**, CRLF ему не мешает. Так что можно смело писать из PowerShell.
-
----
-
-## 📄 Актуальный `README.md`
-
-```markdown
-# ComfyUI Custom Nodes Security Scanner
 
 Скрипт для проверки кастомных нод ComfyUI на вредоносный код.
 Работает через `docker exec` внутри контейнера `comfyui-megapak`.
@@ -21,7 +11,7 @@
 ## Быстрый старт
 
 ```bash
-cd /mnt/c/Users/aiott/Downloads/comfy_docker_pack_app/comfyui-megapak-offline
+cd /mnt/c/Users/aiott/Downloads/comfy_docker_pack_app/comfyui-megapak-offline/scripts/scan_nodes
 
 # Список всех нод
 bash scan.sh --list
@@ -41,17 +31,18 @@ bash scan.sh --report
 ## Файлы
 
 ```
-comfyui-megapak-offline/
+scripts/scan_nodes/
 ├── scan.sh                     # Основной скрипт
 ├── scan_inner.sh               # Inner script (выполняется в контейнере)
 ├── install_scan_toolkit.sh     # Установщик на новом ПК
 ├── README.md                   # Эта документация
 ├── INSTALL.md                  # Инструкция по переносу
+├── CRITICAL_CHECKLIST.md       # Чек-лист при CRITICAL
 ├── whitelist.txt               # (опционально) ноды для пропуска
-├── reports/
-│   ├── scan_*.log              # Полные отчёты
-│   └── suspects_*.log          # Только CRITICAL
-└── _backup/                    # Бэкапы старых версий
+├── scan_toolkit.tar.gz         # Архив для переноса
+└── reports/
+    ├── scan_*.log              # Полные отчёты
+    └── suspects_*.log          # Только CRITICAL
 ```
 
 ---
@@ -143,9 +134,40 @@ bash scan.sh --clean-old       # оставить 5
 bash scan.sh --clean-old 10    # оставить 10
 ```
 
+### `--analyze <path>:<line>`
+
+Анализ конкретной строки с **вердиктом**.
+
+```bash
+bash scan.sh --analyze ComfyUI-Easy-Use/py/libs/api/bizyair.py:268
+```
+
+**Что выводит:**
+
+1. **Контекст** — ±10 строк вокруг указанной с маркером `▶`.
+2. **Вердикт:**
+   - [!!] **ОПАСНО** — обфускация (`exec(base64)`, `__import__('os').system`).
+   - [!] **ОСОЗНАННЫЙ РИСК** — `pickle.loads`, `exec(var)` в корневом файле.
+   - [ok] **НОРМА** — `libc`, `pip install`, `exec(f"...")`.
+   - [ok] **ЛОЖНОЕ** — файл в `extern/`, `tools/`, `tests/`, `.disabled`.
+3. **Причину** вердикта.
+4. **Рекомендацию** — что делать.
+5. **Готовые команды** — проверить / отключить.
+
+**Пример:**
+
+```bash
+bash scan.sh --analyze comfy_mtb/extern/GFPGAN/cog_predict.py:9
+# 📊 Вердикт: [ok] ЛОЖНОЕ
+```
+
 ### `--help` / `-h`
 
 Справка.
+
+```bash
+bash scan.sh --help
+```
 
 ---
 
@@ -209,10 +231,40 @@ bash scan.sh --clean-old 10    # оставить 10
 
 ### `reports/suspects_*.log`
 
-Только CRITICAL. Для быстрого просмотра:
+Только CRITICAL. Включает **сводку по нодам в конце** — список нод с hits.
+
+Для быстрого просмотра:
 
 ```bash
 cat $(ls -t reports/suspects_*.log | head -1)
+```
+
+### Секция «ПОДОЗРИТЕЛЬНЫЕ НОДЫ»
+
+В конце вывода сканера и в `suspects_*.log` — **список нод с CRITICAL**:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║              [!]  ПОДОЗРИТЕЛЬНЫЕ НОДЫ (CRITICAL)              ║
+╚══════════════════════════════════════════════════════════════╝
+
+  [!]  zzz_evil_test_node (7 CRITICAL)
+      file: nodes.py
+
+      analyze: Быстрый анализ с вердиктом:
+         bash scan.sh --analyze nodes.py:1
+
+      check: Проверить (запускать в WSL!):
+         docker exec comfyui-megapak sed -n '1,30p' /root/ComfyUI/custom_nodes/nodes.py
+
+      off: Отключить (запускать в WSL!):
+         docker exec comfyui-megapak mv /root/ComfyUI/custom_nodes/zzz_evil_test_node /root/ComfyUI/custom_nodes/zzz_evil_test_node.disabled
+```
+
+Если CRITICAL нет:
+
+```
+[ok] ПОДОЗРИТЕЛЬНЫХ НОД (CRITICAL): НЕТ
 ```
 
 ---
@@ -228,25 +280,48 @@ cat $(ls -t reports/suspects_*.log | head -1)
 | INFO | 100-130 |
 | ADMIN | 120-150 |
 
-**При CRITICAL > 50** — пришли вывод, разберём.
-
 ---
 
-## Что делать при подозрении
+## Что делать при CRITICAL
 
-Если видишь `exec(base64...)` или `socket.connect(<external>)` в **рабочем**
-`.py` (не `tests/`, не `extern/`, не `tools/`):
+См. **`CRITICAL_CHECKLIST.md`** — пошаговая инструкция.
 
-```bash
-# Посмотреть контекст
-docker exec comfyui-megapak sed -n '<line-10>,<line+10>p' /root/ComfyUI/custom_nodes/<path>
-```
+**Краткая версия:**
 
-**Если подтвердилось:**
+1. Открыть suspects-файл:
 
-1. Отключить ноду: переименовать папку в `.disabled`.
-2. Перезапустить ComfyUI.
-3. Удалить ноду: `docker exec comfyui-megapak rm -rf /root/ComfyUI/custom_nodes/<node>`.
+   ```bash
+   cat $(ls -t reports/suspects_*.log | head -1)
+   ```
+
+2. **Быстрый анализ** — команда `--analyze`:
+
+   ```bash
+   bash scan.sh --analyze <node>/<file>:<line>
+   ```
+
+   Выводит вердикт: [!!] ОПАСНО / [!] ОСОЗНАННЫЙ РИСК / [ok] НОРМА / [ok] ЛОЖНОЕ.
+
+3. **Классифицировать по пути файла:**
+   - `extern/`, `tools/`, `tests/`, `.disabled` → [ok] **ложное, пропустить**.
+   - **Корневой `.py`** → [!!] **проверить руками**.
+
+4. **Проверить контекст:**
+
+   ```bash
+   docker exec comfyui-megapak sed -n '<line-15>,<line+15>p' /root/ComfyUI/custom_nodes/<path>
+   ```
+
+5. Если подтвердилось — **отключить**:
+
+   ```bash
+   docker exec comfyui-megapak mv \
+       /root/ComfyUI/custom_nodes/<node> \
+       /root/ComfyUI/custom_nodes/<node>.disabled
+   docker restart comfyui-megapak
+   ```
+
+**Полная инструкция — в `CRITICAL_CHECKLIST.md`.**
 
 ---
 
@@ -259,7 +334,7 @@ ComfyUI-Manager
 ComfyUI-Impact-Pack
 ```
 
-⚠️ **Whitelist = полный пропуск.** Если файлы ноды изменят — ты этого не увидишь.
+[!] **Whitelist = полный пропуск.** Если файлы ноды изменят — ты этого не увидишь.
 
 **Лучше** использовать `--threshold CRITICAL` вместо whitelist.
 
@@ -327,7 +402,7 @@ grep "scan.sh v" scan.sh
 ```bash
 # На исходной машине — создать архив
 tar -czf scan_toolkit.tar.gz \
-    scan.sh scan_inner.sh install_scan_toolkit.sh README.md INSTALL.md
+    scan.sh scan_inner.sh install_scan_toolkit.sh README.md INSTALL.md CRITICAL_CHECKLIST.md
 
 # На новом ПК — распаковать и установить
 tar -xzf scan_toolkit.tar.gz
@@ -339,7 +414,8 @@ bash scan.sh --list
 
 ## История версий
 
-- **v2.4+** (текущая) — стабильная, `--list`, `--clean-old`, `f-hits`/`hit-files`.
+- **v2.6** (текущая) — `--analyze` с вердиктом ([!!]/[!]/[ok]).
+- **v2.5** — секция «ПОДОЗРИТЕЛЬНЫЕ НОДЫ» с готовыми командами.
 - **v2.4** — проверки существования ноды, обработка ошибок аргументов.
 - **v2.3** — прогресс-бары с `#`/`.` историей.
 - **v2.2** — двухфазный скан (precount).
@@ -353,87 +429,23 @@ bash scan.sh --list
 
 Разработано в рамках интерактивной сессии промпт-инжиниринга.
 
-**Дата финализации:** 2026-09-26
+**Дата финализации:** 2026-10-03
 
 ---
 
-## Известные ложные срабатывания (v2.4+)
+## Известные ложные срабатывания (v2.6)
 
 Все 25 CRITICAL в мегапаке — ложные:
 
-| Файл | Причина |
-|---|---|
-| `VideoX-Fun/.../midas/backbones/utils.py` | Динамическая регистрация слоёв MiDaS |
-| `comfy_mtb/extern/GFPGAN/cog_predict.py` | Установочный скрипт GFPGAN (внешний) |
-| `comfyui_controlnet_aux/.../run_*.py` | CLI-утилиты Mesh Graphormer |
-| `ComfyUI-RMBG/py/AILab_RMBG.py` | Динамическая загрузка модуля BiRefNet |
-| `ComfyUI-UtilsCollection/scripts/manage_*.py` | Внутренняя утилита разработчика |
-| `ComfyUI-ReActor.disabled/...` | Отключённая нода |
-| `ComfyUI-Easy-Use/.../bizyair.py` | `pickle.loads` от API BizyAir |
+| Файл | Причина | Вердикт `--analyze` |
+|---|---|---|
+| `VideoX-Fun/.../midas/backbones/utils.py` | Динамическая регистрация слоёв MiDaS | [ok] НОРМА |
+| `comfy_mtb/extern/GFPGAN/cog_predict.py` | Установочный скрипт GFPGAN (внешний) | [ok] ЛОЖНОЕ |
+| `comfyui_controlnet_aux/.../run_*.py` | CLI-утилиты Mesh Graphormer | [ok] ЛОЖНОЕ (CLI) |
+| `ComfyUI-RMBG/py/AILab_RMBG.py` | Динамическая загрузка модуля BiRefNet | [!] ПОДОЗРИТЕЛЬНО |
+| `ComfyUI-UtilsCollection/scripts/manage_*.py` | Внутренняя утилита разработчика | [ok] ЛОЖНОЕ (CLI) |
+| `ComfyUI-ReActor.disabled/...` | Отключённая нода | [ok] ЛОЖНОЕ (.disabled) |
+| `ComfyUI-Easy-Use/.../bizyair.py` | `pickle.loads` от API BizyAir | [!] ОСОЗНАННЫЙ РИСК |
 
 **Реальных угроз — 0.**
-```
 
----
-
-## 💻 Команда PowerShell для создания файла
-
-Если хочешь **создать README.md из Windows** (не из WSL), есть 3 варианта.
-
-### Вариант A: PowerShell с here-string
-
-⚠️ **Проблема:** here-string `@'...'@` **не поддерживает** markdown-тройные кавычки (```` ``` ````) — они конфликтуют с терминатором. Придётся **экранировать** или использовать другой подход.
-
-**Проще всего:**
-
-```powershell
-# Открыть папку
-cd "C:\Users\aiott\Downloads\comfy_docker_pack_app\comfyui-megapak-offline"
-
-# Создать через Notepad (вставишь содержимое вручную)
-notepad README.md
-```
-
-Или **через VS Code**:
-
-```powershell
-cd "C:\Users\aiott\Downloads\comfy_docker_pack_app\comfyui-megapak-offline"
-code README.md
-```
-
-### Вариант B: PowerShell + Set-Content с массивом строк
-
-Громоздко, но работает:
-
-```powershell
-cd "C:\Users\aiott\Downloads\comfy_docker_pack_app\comfyui-megapak-offline"
-
-$content = @(
-'# ComfyUI Custom Nodes Security Scanner',
-'',
-'Скрипт для проверки кастомных нод ComfyUI на вредоносный код.',
-'Работает через `docker exec` внутри контейнера `comfyui-megapak`.',
-'',
-'**Ничего не удаляет и не изменяет.**',
-''
-)
-
-$content | Set-Content -Path README.md -Encoding UTF8
-```
-
-### Вариант C (рекомендую): Создать README.md **из WSL** через `cat`
-
-Это **самый надёжный путь** — потому что:
-
-- Markdown-синтаксис (```` ``` ````) не ломается.
-- LF-переводы строк (Windows-Notepad раньше ломал, но в 11-м уже норм).
-- Никаких PowerShell-эскейпов.
-
-**Команда для WSL:**
-
-```bash
-cd /mnt/c/Users/aiott/Downloads/comfy_docker_pack_app/comfyui-megapak-offline
-
-cat > README.md <<'README_EOF'
-# ComfyUI Custom Nodes Security Scanner
-... (вставить весь контент выше) ...

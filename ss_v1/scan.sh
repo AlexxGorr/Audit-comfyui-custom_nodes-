@@ -14,6 +14,8 @@ NODE_ROOT="/root/ComfyUI/custom_nodes"
 INNER_IN_CONTAINER="/tmp/scan_inner.sh"
 WL_IN_CONTAINER="/tmp/scan_whitelist.txt"
 SUSPECT_FILE=""
+CLEAN_KEEP=5
+ANALYZE_ARG=""
 
 DISPLAY_MODE="auto"
 SCOPE=""
@@ -41,7 +43,9 @@ LIVE_LINES_DRAWN=0
 
 # Накопители hits для секции "Подозрительные ноды"
 declare -a SUSPICIOUS_LINES=()
+declare -a SUSPICIOUS_FILES=()
 declare -a GLOBAL_SUSPICIOUS_NODES=()
+declare -a GLOBAL_SUSPICIOUS_FILES=()
 REPORT_FILE=""
 
 declare -a FILE_HISTORY=()
@@ -271,6 +275,7 @@ run_scan() {
                 CUR_NODE_HITS=0
                 FILE_HISTORY=()
                 SUSPICIOUS_LINES=()
+                SUSPICIOUS_FILES=()
                 draw_live
                 ;;
             NODE_SKIP) log "[WHITELISTED] $a" ;;
@@ -280,21 +285,30 @@ run_scan() {
                 fi
                 if [ "${#SUSPICIOUS_LINES[@]}" -gt 0 ]; then
                     log ""
-                    log "  ⚠️  ПОДОЗРИТЕЛЬНАЯ НОДА: $a — CRITICAL: ${#SUSPICIOUS_LINES[@]}"
+                    log "  [!] ПОДОЗРИТЕЛЬНАЯ НОДА: $a - CRITICAL: ${#SUSPICIOUS_LINES[@]}"
                     local s
                     for s in "${SUSPICIOUS_LINES[@]}"; do
                         local s_loc="${s%%|*}"
                         local rest="${s#*|}"
                         local s_snip="${rest%%|*}"
                         local s_reason="${rest##*|}"
-                        log "      ├─ $s_loc"
-                        log "      │   Код:    $s_snip"
-                        log "      │   Причина: $s_reason"
+                        log "      |- $s_loc"
+                        log "      |   Код:    $s_snip"
+                        log "      |   Причина: $s_reason"
                     done
+
+                    # Генерируем команды для проверки
+                    log ""
+                    log "      doc: cat CRITICAL_CHECKLIST.md"
                     log ""
 
                     # Запоминаем в глобальном списке
                     GLOBAL_SUSPICIOUS_NODES+=("$a|${#SUSPICIOUS_LINES[@]}")
+                    # Запоминаем уникальные файлы
+                    local f
+                    for f in "${SUSPICIOUS_FILES[@]}"; do
+                        GLOBAL_SUSPICIOUS_FILES+=("$a|$f")
+                    done
                 fi
                 ;;
             FILE_START)
@@ -331,6 +345,15 @@ run_scan() {
                 # Запоминаем CRITICAL для секции "Подозрительные ноды"
                 if [ "$lvl" = "CRITICAL" ]; then
                     SUSPICIOUS_LINES+=("$loc|$snip|$reason")
+                    # Запоминаем файл (без :line)
+                    local hit_file="${loc%:*}"
+                    # Проверяем, нет ли уже такого файла
+                    local already=0
+                    local existing
+                    for existing in "${SUSPICIOUS_FILES[@]}"; do
+                        [ "$existing" = "$hit_file" ] && already=1 && break
+                    done
+                    [ "$already" -eq 0 ] && SUSPICIOUS_FILES+=("$hit_file")
                 fi
                 if passes_threshold "$lvl"; then
                     if [ "$DISPLAY_MODE" = "stream" ]; then
@@ -382,28 +405,54 @@ run_scan() {
     # --- Секция подозрительных нод ---
     if [ "${#GLOBAL_SUSPICIOUS_NODES[@]}" -gt 0 ]; then
         log ""
-        log "╔══════════════════════════════════════════════════════════════╗"
-        log "║              ⚠️  ПОДОЗРИТЕЛЬНЫЕ НОДЫ (CRITICAL)              ║"
-        log "╚══════════════════════════════════════════════════════════════╝"
+        log "================================================================"
+        log "           [!] ПОДОЗРИТЕЛЬНЫЕ НОДЫ (CRITICAL)"
+        log "================================================================"
         log ""
 
         local entry node_name node_count
         for entry in "${GLOBAL_SUSPICIOUS_NODES[@]}"; do
             node_name="${entry%%|*}"
             node_count="${entry##*|}"
-            log "  ⚠️  $node_name ($node_count CRITICAL)"
+            log ""
+            log "  [!] $node_name ($node_count CRITICAL)"
+
+            # Файлы с CRITICAL в этой ноде
+            local file_entry fnode fpath
+            local first_file=""
+            for file_entry in "${GLOBAL_SUSPICIOUS_FILES[@]}"; do
+                fnode="${file_entry%%|*}"
+                fpath="${file_entry#*|}"
+                [ "$fnode" = "$node_name" ] || continue
+                [ -z "$first_file" ] && first_file="$fpath"
+            done
+
+            if [ -n "$first_file" ]; then
+                log "      file: $first_file"
+                log ""
+                log "      analyze: bash $0 --analyze $first_file:1"
+                
+                log ""
+                log "      check (в WSL):"
+                log "         docker exec $CONTAINER sed -n '1,30p' $NODE_ROOT/$first_file"
+                log ""
+                log "      off (в WSL):"
+                log "         docker exec $CONTAINER mv $NODE_ROOT/$node_name $NODE_ROOT/$node_name.disabled"
+            fi
         done
 
         log ""
         log "Подробности:"
         log "  cat $(ls -t "$REPORTS_DIR"/suspects_*.log 2>/dev/null | head -1)"
         log ""
+        log "doc: CRITICAL_CHECKLIST.md"
+        log ""
         log "ВНИМАНИЕ: находки CRITICAL требуют ручной проверки!"
         log "Реальные угрозы редки, но возможны. Открой suspects-файл"
         log "и проверь каждую находку глазами."
     else
         log ""
-        log "✅ ПОДОЗРИТЕЛЬНЫХ НОД (CRITICAL): НЕТ"
+        log "[ok] ПОДОЗРИТЕЛЬНЫХ НОД (CRITICAL): НЕТ"
     fi
 
     log ""
@@ -422,10 +471,10 @@ run_scan() {
                 for entry in "${GLOBAL_SUSPICIOUS_NODES[@]}"; do
                     node_name="${entry%%|*}"
                     node_count="${entry##*|}"
-                    echo "  ⚠️  $node_name — $node_count CRITICAL"
+                    echo "  [!] $node_name - $node_count CRITICAL"
                 done
             else
-                echo "  ✅ Нет нод с CRITICAL"
+                echo "  [ok] Нет нод с CRITICAL"
             fi
             echo ""
         } >> "$SUSPECT_FILE"
@@ -442,6 +491,191 @@ check_target_exists() {
         err "Внутри контейнера: $NODE_ROOT/$TARGET"
         exit 1
     fi
+}
+
+clean_old() {
+    local keep="${1:-5}"
+    mkdir -p "$REPORTS_DIR"
+
+    local scan_count
+    scan_count=$(ls -1 "$REPORTS_DIR"/scan_*.log 2>/dev/null | wc -l)
+    local susp_count
+    susp_count=$(ls -1 "$REPORTS_DIR"/suspects_*.log 2>/dev/null | wc -l)
+
+    log "Найдено отчётов: scan=$scan_count, suspects=$susp_count"
+    log "Оставляю последние: $keep"
+    log ""
+
+    local removed=0
+
+    if [ "$scan_count" -gt "$keep" ]; then
+        while IFS= read -r f; do
+            log "  rm $f"
+            rm -f "$f"
+            removed=$((removed + 1))
+        done < <(ls -1t "$REPORTS_DIR"/scan_*.log 2>/dev/null | tail -n +$((keep + 1)))
+    fi
+
+    if [ "$susp_count" -gt "$keep" ]; then
+        while IFS= read -r f; do
+            log "  rm $f"
+            rm -f "$f"
+            removed=$((removed + 1))
+        done < <(ls -1t "$REPORTS_DIR"/suspects_*.log 2>/dev/null | tail -n +$((keep + 1)))
+    fi
+
+    log ""
+    log "Удалено: $removed файлов."
+    log "Осталось:"
+    ls -1 "$REPORTS_DIR" 2>/dev/null | head -20 | sed 's/^/  /'
+}
+
+analyze_line() {
+    local path="$1"
+    local line="$2"
+
+    if [ -z "$path" ] || [ -z "$line" ]; then
+        err "Использование: bash $0 --analyze <node>/<file>:<line>"
+        return 1
+    fi
+
+    # Проверить существование файла
+    if ! docker exec "$CONTAINER" test -f "$NODE_ROOT/$path" 2>/dev/null; then
+        err "Файл не найден: $NODE_ROOT/$path"
+        return 1
+    fi
+
+    local ctx_start=$((line - 10))
+    [ "$ctx_start" -lt 1 ] && ctx_start=1
+    local ctx_end=$((line + 10))
+
+    log "═══════════════════════════════════════════════════════════════════"
+    log "  Анализ: $path:$line"
+    log "═══════════════════════════════════════════════════════════════════"
+    log ""
+    log "Контекст (строки ${ctx_start}-${ctx_end}):"
+    log "───────────────────────────────────────────────────────────────────"
+
+    docker exec "$CONTAINER" sed -n "${ctx_start},${ctx_end}p" "$NODE_ROOT/$path" | \
+        awk -v start="$ctx_start" -v target="$line" '
+            {
+                lineno = start + NR - 1
+                if (lineno == target) {
+                    printf "▶ %4d: %s\n", lineno, $0
+                } else {
+                    printf "  %4d: %s\n", lineno, $0
+                }
+            }
+        '
+
+    log "───────────────────────────────────────────────────────────────────"
+    log ""
+
+    # Получить целевую строку
+    local target_line
+    target_line="$(docker exec "$CONTAINER" sed -n "${line}p" "$NODE_ROOT/$path" 2>/dev/null)"
+    local trimmed="${target_line#"${target_line%%[![:space:]]*}"}"
+
+    # Классификация
+    local verdict=""
+    local reason=""
+    local recommendation=""
+
+    # === 1. По пути ===
+    case "$path" in
+        extern/*|*/extern/*|third_party/*|*/third_party/*|vendor/*|*/vendor/*)
+            verdict="[ok] ЛОЖНОЕ"
+            reason="Файл в сторонней библиотеке (extern/third_party/vendor)."
+            recommendation="Сторонние библиотеки не исполняются ComfyUI при импорте."
+            ;;
+        tools/*|*/tools/*|cli/*|*/cli/*|scripts/*|*/scripts/*)
+            verdict="[ok] ЛОЖНОЕ (CLI)"
+            reason="CLI-скрипт в tools/, cli/, scripts/."
+            recommendation="Запускается вручную, не исполняется при импорте ноды."
+            ;;
+        */tests/*|*/test/*|*/examples/*|*/example/*|*/docs/*)
+            verdict="[ok] ЛОЖНОЕ (тест)"
+            reason="Тестовый файл или пример."
+            recommendation="Не исполняется в продакшене."
+            ;;
+        *.disabled/*|*.disabled|*.disabled)
+            verdict="[ok] ЛОЖНОЕ (.disabled)"
+            reason="Нода отключена."
+            recommendation="ComfyUI её не загружает."
+            ;;
+        *)
+            # === 2. По паттернам в строке ===
+            if [[ "$trimmed" =~ exec\(.*base64 ]] || [[ "$trimmed" =~ exec\(.*b64decode ]]; then
+                verdict="[!!] ОПАСНО"
+                reason="exec() + base64 — обфусцированная нагрузка."
+                recommendation="НЕМЕДЛЕННО отключить ноду: bash scan.sh --report; mv <node> <node>.disabled"
+            elif [[ "$trimmed" =~ __import__.*os.*system ]]; then
+                verdict="[!!] ОПАСНО"
+                reason="Обфусцированный вызов os.system через __import__."
+                recommendation="НЕМЕДЛЕННО отключить ноду."
+            elif [[ "$trimmed" =~ eval\(.*input\( ]] || [[ "$trimmed" =~ exec\(.*input\( ]]; then
+                verdict="[!!] ОПАСНО"
+                reason="exec/eval от пользовательского ввода."
+                recommendation="НЕМЕДЛЕННО отключить ноду."
+            elif [[ "$trimmed" =~ exec\(.*sys\.argv ]]; then
+                verdict="[!!] ОПАСНО"
+                reason="exec() от аргументов CLI."
+                recommendation="Проверить, откуда приходят аргументы."
+            elif [[ "$trimmed" =~ exec\(f ]] || [[ "$trimmed" =~ exec\(\" ]] || [[ "$trimmed" =~ exec\(\' ]]; then
+                verdict="[ok] НОРМА (шаблон)"
+                reason="exec() с фиксированным шаблоном — динамическая регистрация."
+                recommendation="Проверить, что шаблон не содержит внешних данных."
+            elif [[ "$trimmed" =~ os\.system\(.*pip ]]; then
+                verdict="[ok] НОРМА (установка)"
+                reason="os.system с pip — установка зависимостей."
+                recommendation="Стандартная практика для install.py."
+            elif [[ "$trimmed" =~ ctypes\.CDLL.*(libc|libcudart|libcuda|nvrtc) ]]; then
+                verdict="[ok] НОРМА (libc)"
+                reason="Загрузка системной библиотеки (libc/libcuda/nvrtc)."
+                recommendation="Используется для оптимизации памяти/GPU."
+            elif [[ "$trimmed" =~ pickle\.loads ]]; then
+                verdict="[!] ОСОЗНАННЫЙ РИСК"
+                reason="pickle.loads — опасная десериализация."
+                recommendation="Проверить источник данных: сеть (requests/urllib) = риск; локальный файл = норма."
+            elif [[ "$trimmed" =~ exec\(open\( ]]; then
+                verdict="[!] ПРОВЕРИТЬ"
+                reason="exec(open('...').read()) — динамическая загрузка локального файла."
+                recommendation="Проверить содержимое файла, который загружается."
+            elif [[ "$trimmed" =~ exec\( ]]; then
+                verdict="[!] ПОДОЗРИТЕЛЬНО"
+                reason="exec() в корневом файле — нужно понять источник данных."
+                recommendation="Проверить: откуда данные для exec() — константа (норма) или переменная (риск)."
+            elif [[ "$trimmed" =~ os\.system ]] || [[ "$trimmed" =~ subprocess ]]; then
+                verdict="[!] ПОДОЗРИТЕЛЬНО"
+                reason="Вызов внешнего процесса в корневом файле."
+                recommendation="Проверить аргументы: константы (норма) или переменные (риск)."
+            elif [[ "$trimmed" =~ ctypes\.CDLL ]]; then
+                verdict="[!] ПОДОЗРИТЕЛЬНО"
+                reason="Загрузка нативной библиотеки."
+                recommendation="Проверить путь к библиотеке — системная или из /tmp/."
+            else
+                verdict="[?] НЕ ОПРЕДЕЛЕНО"
+                reason="Паттерн не распознан."
+                recommendation="Посмотреть контекст выше и решить вручную."
+            fi
+            ;;
+    esac
+
+    log "VERDICT: $verdict"
+    log "   Причина: $reason"
+    log ""
+    log "NOTE:"
+    log "   $recommendation"
+    log ""
+    log "───────────────────────────────────────────────────────────────────"
+    log ""
+    log "file: Файл целиком (первые 30 строк):"
+    log "   docker exec $CONTAINER sed -n '1,30p' $NODE_ROOT/$path"
+    log ""
+    log "off: Отключить ноду (если подтвердится):"
+    local node_name="${path%%/*}"
+    log "   docker exec $CONTAINER mv $NODE_ROOT/$node_name $NODE_ROOT/$node_name.disabled"
+    log ""
 }
 
 list_nodes() {
@@ -481,6 +715,8 @@ scan.sh v2.4 — security scanner для ComfyUI custom_nodes
   --scan <name>       Сканировать конкретную ноду.
   --scan-all          Сканировать все ноды.
   --list              Список доступных нод.
+  --clean-old [N]     Удалить старые отчёты, оставить N (по умолч. 5).
+  --analyze <path>:<line>  Анализ конкретной строки с вердиктом.
   --threshold LEVEL   Порог: INFO|ADMIN|WARNING|CRITICAL (по умолч. INFO).
   --live / --stream   Режим отображения.
   --include-js        Включить .js-файлы.
@@ -504,6 +740,25 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --list)        SCOPE="list"; shift ;;
+            --analyze)
+                if [ -z "${2:-}" ]; then
+                    err "Использование: --analyze <node>/<file>:<line>"
+                    exit 2
+                fi
+                ANALYZE_ARG="$2"
+                SCOPE="analyze"
+                shift 2
+                ;;
+            --clean-old)
+                SCOPE="clean"
+                if [ -n "${2:-}" ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                    CLEAN_KEEP="$2"
+                    shift 2
+                else
+                    CLEAN_KEEP=5
+                    shift
+                fi
+                ;;
             --scan)
                 SCOPE="scan"
                 if [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
@@ -539,6 +794,16 @@ main() {
     check_target_exists
     if [ "$SCOPE" = "list" ]; then
         list_nodes
+        exit 0
+    fi
+    if [ "$SCOPE" = "analyze" ]; then
+        local path="${ANALYZE_ARG%:*}"
+        local line="${ANALYZE_ARG##*:}"
+        analyze_line "$path" "$line"
+        exit 0
+    fi
+    if [ "$SCOPE" = "clean" ]; then
+        clean_old "$CLEAN_KEEP"
         exit 0
     fi
     detect_display_mode
